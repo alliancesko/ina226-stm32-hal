@@ -85,9 +85,14 @@ extern "C" {
 /* Measurement and calibration constants. */
 
 #define INA226_I2C_TIMEOUT_MS       100U
-#define INA226_CALIBRATION_NATURAL  0x0800U
+#define INA226_RESET_POLL_ATTEMPTS  10U
+#define INA226_CURRENT_REG_COUNTS   32768.0f
+#define INA226_CALIBRATION_MAX      0x7FFFU
+#define INA226_CALIBRATION_CONSTANT 0.00512f
+#define INA226_SHUNT_RANGE_V        0.0819175f
 #define INA226_SHUNT_LSB_UV         2.5f
 #define INA226_BUS_LSB_MV           1.25f
+#define INA226_POWER_LSB_MULTIPLIER 25.0f
 
 
 /** @brief Driver operation result. */
@@ -192,6 +197,7 @@ typedef struct
     uint8_t address;           /**< 7-bit I2C address. */
 
     float shunt_ohm;           /**< Shunt resistance in ohms. */
+    float max_current_A;       /**< Maximum expected current magnitude in amperes. */
 
     float current_lsb_A;       /**< Current register LSB in amperes. */
     float power_lsb_W;         /**< Power register LSB in watts. */
@@ -210,16 +216,17 @@ typedef struct
 /**
  * @brief Initialize INA226 for continuous shunt and bus measurements.
  *
- * The driver verifies the manufacturer and die IDs, uses the fixed
- * +/-81.92 mV shunt range, derives Current_LSB from the shunt resistance,
- * and configures 1.1 ms conversion times with 16-sample averaging.
+ * The driver verifies the manufacturer and die IDs, checks the requested
+ * current against the fixed +/-81.92 mV shunt range, calculates Current_LSB,
+ * Power_LSB, and Calibration, then configures continuous measurements.
  *
  * @param dev            INA226 device handle.
  * @param hi2c           STM32 HAL I2C handle.
  * @param address        7-bit INA226 I2C address (0x40 ... 0x4F).
  * @param shunt_ohm      Shunt resistance in ohms.
+ * @param max_current_A  Maximum expected current magnitude in amperes.
  */
-INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm);
+INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A);
 
 
 /**

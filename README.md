@@ -6,7 +6,7 @@ Russian documentation: [README_RUS.md](README_RUS.md)
 
 This is a small, self-contained INA226 current, voltage, and power monitor driver for STM32CubeIDE projects using STM32 HAL.
 
-The driver is not tied to a specific STM32 family. It requires a compatible STM32 HAL implementation with blocking I2C functions and `HAL_Delay()`.
+The driver is not tied to a specific STM32 family. It requires a compatible STM32 HAL implementation with blocking I2C functions.
 
 Main features:
 
@@ -66,7 +66,7 @@ INA226_Handle_t ina;
 INA226_Data_t data;
 INA226_Status_t status;
 
-status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 
 if (status != INA226_OK)
 {
@@ -117,13 +117,13 @@ With a `0.01 Ω` shunt, commonly marked `R010`, the corresponding range is appro
 
 This calculation describes the INA226 measurement range only. The shunt power rating, PCB traces, connectors, and wiring must be designed for the actual current.
 
-Only the physical shunt resistance is passed to the driver:
+Pass both the physical shunt resistance and the maximum expected current magnitude to the driver:
 
 ```c
-INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 ```
 
-The expected working current is not a calibration parameter. If the application must detect a lower limit, for example `0.5 A`, configure a Shunt Over-Voltage ALERT at `0.5 A × 0.1 Ω = 50 mV` while retaining the complete measurement range.
+`max_current_A` sets the Current Register scale and must not exceed the physical limit of `81.9175 mV / Rshunt`. A lower value provides a finer Current LSB, but current beyond the configured range can set OVF. Configure a protection threshold separately through ALERT when required.
 
 ### Measurement Resolution
 
@@ -184,7 +184,7 @@ One handle represents one physical INA226:
 INA226_Handle_t ina;
 ```
 
-It stores the selected I2C peripheral, 7-bit address, shunt resistance, calculated scaling values, cached register values, ALERT state, and initialization state.
+It stores the selected I2C peripheral, 7-bit address, shunt resistance, maximum expected current, calculated scaling values, cached register values, ALERT state, and initialization state.
 
 Do not modify handle fields manually after successful initialization.
 
@@ -241,7 +241,7 @@ typedef struct
 ### `INA226_Init()`
 
 ```c
-INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm);
+INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A);
 ```
 
 Parameters:
@@ -249,20 +249,22 @@ Parameters:
 - `dev`: handle for this INA226;
 - `hi2c`: STM32 HAL I2C handle;
 - `address`: 7-bit INA226 address;
-- `shunt_ohm`: shunt resistance in ohms.
+- `shunt_ohm`: shunt resistance in ohms;
+- `max_current_A`: maximum expected current magnitude in amperes.
 
 The function performs the following operations:
 
 1. Validates pointers and numeric parameters.
 2. Validates the `0x40 ... 0x4F` address range.
-3. Derives Current LSB directly from the shunt resistance.
-4. Calculates Power LSB and selects the natural calibration value.
-5. Probes the device with `HAL_I2C_IsDeviceReady()`.
-6. Verifies Manufacturer ID `0x5449`.
-7. Verifies Die ID `0x2260`, ignoring revision bits.
-8. Performs a software reset.
-9. Writes the Configuration Register.
-10. Writes the Calibration Register.
+3. Validates `max_current_A × shunt_ohm` against the positive `81.9175 mV` limit.
+4. Calculates the minimum Current LSB as `max_current_A / 32768`.
+5. Calculates Power LSB and the Calibration Register, validating its 15-bit range.
+6. Probes the device with `HAL_I2C_IsDeviceReady()`.
+7. Verifies Manufacturer ID `0x5449`.
+8. Verifies Die ID `0x2260`, ignoring revision bits.
+9. Performs a software reset.
+10. Writes the Configuration Register.
+11. Writes the Calibration Register.
 
 Default configuration:
 
@@ -279,23 +281,23 @@ The approximate update period is:
 (1.1 ms + 1.1 ms) × 16 = 35.2 ms
 ```
 
-Current scaling is derived from the physical Shunt Voltage LSB:
+Current scaling follows the datasheet equations:
 
 ```text
-Current LSB = 2.5 µV / Rshunt
-Power LSB   = 25 × Current LSB
-Calibration = 2048 = 0x0800
+Minimum Current LSB = Maximum Expected Current / 2^15
+Calibration         = 0.00512 / (Current LSB × Rshunt)
+Power LSB           = 25 × Current LSB
 ```
 
-For an `R100` shunt:
+For maximum resolution, the driver uses the minimum Current LSB without upward rounding. For an `R100` shunt and `max_current_A = 0.8 A`:
 
 ```text
-Current LSB       = 25 µA
-Power LSB         = 625 µW
-Measurement range = ±819.175 mA
+Current LSB = 24.4140625 µA
+Power LSB   = 610.3515625 µW
+Calibration = 2097 = 0x0831
 ```
 
-This natural scaling keeps the Current Register range aligned with the physical Shunt Voltage Register range. A lower application limit should be implemented with ALERT, not by narrowing Current Register calibration.
+The requested current is a Current Register scaling range, not a protection threshold, and it does not extend the physical shunt-input range. Both `shunt_ohm` and `max_current_A` must be finite and positive. If the shunt drop exceeds `81.9175 mV` or the calculated calibration does not fit in 15 bits, the function returns `INA226_ERROR_PARAM`.
 
 ## Reading Measurements
 
@@ -665,11 +667,11 @@ The function:
 
 1. marks the handle as uninitialized;
 2. writes the reset bit to the Configuration Register;
-3. waits `3 ms`;
-4. verifies that the reset bit has cleared;
+3. reads the Configuration Register until the self-clearing `RST` bit is clear;
+4. stops polling after `INA226_RESET_POLL_ATTEMPTS` unsuccessful checks;
 5. updates cached handle values.
 
-Reset restores INA226 registers to their default values, including clearing the Calibration Register. Call `INA226_Init()` before using high-level measurement functions again.
+Reset restores INA226 registers to their default values, including clearing the Calibration Register. If the `RST` bit does not clear, the function returns `INA226_ERROR_TIMEOUT`. The driver does not use a fixed delay or call `HAL_Delay()` internally. Call `INA226_Init()` before using high-level measurement functions again.
 
 ### `INA226_DeInit()`
 
@@ -699,15 +701,15 @@ INA226_Data_t data2;
 Same bus, different addresses:
 
 ```c
-INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f);
-INA226_Init(&ina2, &hi2c1, INA226_ADDR_GND_VS, 0.1f);
+INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f, 0.8f);
+INA226_Init(&ina2, &hi2c1, INA226_ADDR_GND_VS, 0.1f, 0.8f);
 ```
 
 Different buses, identical addresses:
 
 ```c
-INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f);
-INA226_Init(&ina2, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f, 0.8f);
+INA226_Init(&ina2, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 ```
 
 Identical addresses are valid because the physical buses are independent. A temporary status variable can be shared:
@@ -808,7 +810,7 @@ INA226_Status_t status;
 
 MX_I2C2_Init();
 
-status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 
 if (status != INA226_OK)
 {

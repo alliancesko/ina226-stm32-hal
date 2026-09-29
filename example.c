@@ -20,7 +20,7 @@ INA226_Status_t ina226_example_status;
 /** @brief Initialize an INA226 with an R100 shunt for continuous measurements. */
 void INA226_ExampleInit(void)
 {
-    ina226_example_status = INA226_Init(&ina226_example_device, &hi2c1, INA226_ADDR_GND_GND, 0.1f);
+    ina226_example_status = INA226_Init(&ina226_example_device, &hi2c1, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 
     if (ina226_example_status != INA226_OK)
         Error_Handler();

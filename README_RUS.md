@@ -6,7 +6,7 @@ English documentation: [README.md](README.md)
 
 Драйвер предназначен для работы с измерителем тока, напряжения и мощности INA226 в проектах STM32CubeIDE с использованием STM32 HAL.
 
-Драйвер не привязан к конкретной серии STM32. Требуется реализация STM32 HAL с совместимыми блокирующими функциями I2C и системным tick для `HAL_Delay()`.
+Драйвер не привязан к конкретной серии STM32. Требуется реализация STM32 HAL с совместимыми блокирующими функциями I2C.
 
 Основные свойства:
 
@@ -65,7 +65,7 @@ INA226_Handle_t ina;
 INA226_Data_t data;
 INA226_Status_t status;
 
-status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 
 if (status != INA226_OK)
 {
@@ -116,13 +116,13 @@ INA226 имеет фиксированный диапазон напряжени
 
 Этот расчёт описывает только измерительный диапазон INA226. Мощность шунта, дорожки платы, разъёмы и проводка должны быть рассчитаны на фактический ток.
 
-В драйвер передаётся только фактическое сопротивление шунта:
+В драйвер передаются фактическое сопротивление шунта и максимальный ожидаемый ток по модулю:
 
 ```c
-INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 ```
 
-Ожидаемый рабочий ток не является параметром калибровки. Если приложение должно обнаруживать меньший предел, например `0.5 A`, следует настроить Shunt Over-Voltage ALERT на `0.5 A × 0.1 Ω = 50 mV`, сохранив полный измерительный диапазон.
+`max_current_A` задаёт масштаб Current Register и не должен превышать физический предел `81.9175 mV / Rshunt`. Меньшее значение даёт более мелкий Current LSB, но ток за пределами настроенного диапазона может установить OVF. Предел защиты при необходимости задаётся отдельно через ALERT.
 
 ### Дискретность измерений
 
@@ -188,6 +188,7 @@ INA226_Handle_t ina;
 - указатель на используемый `I2C_HandleTypeDef`;
 - 7-битный адрес устройства;
 - сопротивление шунта;
+- максимальный ожидаемый ток;
 - Current LSB и Power LSB;
 - рассчитанное значение Calibration Register;
 - текущая конфигурация;
@@ -249,7 +250,7 @@ typedef struct
 ### `INA226_Init()`
 
 ```c
-INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm);
+INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A);
 ```
 
 Параметры:
@@ -257,20 +258,22 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
 - `dev` — handle конкретного INA226;
 - `hi2c` — используемый контроллер I2C STM32;
 - `address` — 7-битный адрес INA226;
-- `shunt_ohm` — сопротивление шунта в омах.
+- `shunt_ohm` — сопротивление шунта в омах;
+- `max_current_A` — максимальный ожидаемый ток по модулю в амперах.
 
 Функция выполняет:
 
 1. Проверку указателей и числовых параметров.
 2. Проверку адреса `0x40 ... 0x4F`.
-3. Расчёт Current LSB непосредственно из сопротивления шунта.
-4. Расчёт Power LSB и выбор естественного значения калибровки.
-5. Проверку присутствия устройства через `HAL_I2C_IsDeviceReady()`.
-6. Проверку Manufacturer ID `0x5449`.
-7. Проверку Die ID `0x2260` с маскированием revision bits.
-8. Программный reset.
-9. Запись Configuration Register.
-10. Запись Calibration Register.
+3. Проверку `max_current_A × shunt_ohm` относительно положительного предела `81.9175 mV`.
+4. Расчёт минимального Current LSB как `max_current_A / 32768`.
+5. Расчёт Power LSB и Calibration Register с проверкой допустимого 15-битного значения.
+6. Проверку присутствия устройства через `HAL_I2C_IsDeviceReady()`.
+7. Проверку Manufacturer ID `0x5449`.
+8. Проверку Die ID `0x2260` с маскированием revision bits.
+9. Программный reset.
+10. Запись Configuration Register.
+11. Запись Calibration Register.
 
 Конфигурация по умолчанию:
 
@@ -287,23 +290,23 @@ Mode:                    Shunt + Bus Continuous
 (1.1 ms + 1.1 ms) × 16 = 35.2 ms
 ```
 
-Масштаб Current Register рассчитывается из физического шага Shunt Voltage:
+Масштаб Current Register рассчитывается по формулам даташита:
 
 ```text
-Current LSB = 2.5 µV / Rshunt
-Power LSB   = 25 × Current LSB
-Calibration = 2048 = 0x0800
+Minimum Current LSB = Maximum Expected Current / 2^15
+Calibration         = 0.00512 / (Current LSB × Rshunt)
+Power LSB           = 25 × Current LSB
 ```
 
-Для шунта `R100`:
+Для максимального разрешения драйвер использует минимальный Current LSB без округления вверх. Для шунта `R100` и `max_current_A = 0.8 A`:
 
 ```text
-Current LSB       = 25 µA
-Power LSB         = 625 µW
-Диапазон измерения = ±819.175 mA
+Current LSB = 24.4140625 µA
+Power LSB   = 610.3515625 µW
+Calibration = 2097 = 0x0831
 ```
 
-Такое естественное масштабирование согласует диапазон Current Register с физическим диапазоном Shunt Voltage Register. Меньший рабочий предел следует задавать через ALERT, а не сужением калибровки Current Register.
+Заданный ток является диапазоном масштабирования Current Register, а не пределом защиты и не расширяет физический диапазон шунтового входа. Значения `shunt_ohm` и `max_current_A` должны быть конечными и положительными. Если падение на шунте превышает `81.9175 mV` либо рассчитанная калибровка не помещается в 15 бит, функция возвращает `INA226_ERROR_PARAM`.
 
 ## Чтение измерений
 
@@ -686,11 +689,11 @@ INA226_Status_t INA226_Reset(INA226_Handle_t *dev);
 
 1. Помечает handle как неинициализированный.
 2. Записывает reset bit в Configuration Register.
-3. Ожидает `3 ms`.
-4. Проверяет, что reset bit очистился.
+3. Читает Configuration Register до самоочистки бита `RST`.
+4. Прерывает опрос после `INA226_RESET_POLL_ATTEMPTS` неудачных проверок.
 5. Обновляет кешированные значения handle.
 
-Reset сбрасывает регистры INA226 к начальным значениям, включая Calibration Register. После успешного reset необходимо повторно вызвать `INA226_Init()`.
+Reset сбрасывает регистры INA226 к начальным значениям, включая Calibration Register. Если бит `RST` не очистился, возвращается `INA226_ERROR_TIMEOUT`. Фиксированная задержка и `HAL_Delay()` внутри драйвера не используются. После успешного reset необходимо повторно вызвать `INA226_Init()`.
 
 ### `INA226_DeInit()`
 
@@ -720,15 +723,15 @@ INA226_Data_t data2;
 ### Одна I2C-шина, разные адреса
 
 ```c
-INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f);
-INA226_Init(&ina2, &hi2c1, INA226_ADDR_GND_VS, 0.1f);
+INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f, 0.8f);
+INA226_Init(&ina2, &hi2c1, INA226_ADDR_GND_VS, 0.1f, 0.8f);
 ```
 
 ### Разные I2C-шины, одинаковые адреса
 
 ```c
-INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f);
-INA226_Init(&ina2, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+INA226_Init(&ina1, &hi2c1, INA226_ADDR_GND_GND, 0.1f, 0.8f);
+INA226_Init(&ina2, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 ```
 
 Одинаковый адрес допустим, потому что физические I2C-шины независимы.
@@ -839,7 +842,7 @@ INA226_Status_t status;
 
 MX_I2C2_Init();
 
-status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f);
+status = INA226_Init(&ina, &hi2c2, INA226_ADDR_GND_GND, 0.1f, 0.8f);
 
 if (status != INA226_OK)
 {

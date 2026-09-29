@@ -128,7 +128,8 @@ INA226_Status_t INA226_WriteRegister(INA226_Handle_t *dev, uint8_t reg, uint16_t
 /** @brief Reset INA226 and invalidate its initialized driver state. */
 INA226_Status_t INA226_Reset(INA226_Handle_t *dev)
 {
-    uint16_t configuration;
+    uint16_t configuration = INA226_CONFIG_RESET;
+    uint8_t attempt;
     INA226_Status_t status;
 
     if (!INA226_IsHandleValid(dev))
@@ -141,12 +142,16 @@ INA226_Status_t INA226_Reset(INA226_Handle_t *dev)
     if (status != INA226_OK)
         return status;
 
-    HAL_Delay(3U);
+    for (attempt = 0U; attempt < INA226_RESET_POLL_ATTEMPTS; attempt++)
+    {
+        status = INA226_Read16(dev, INA226_REG_CONFIG, &configuration);
 
-    status = INA226_Read16(dev, INA226_REG_CONFIG, &configuration);
+        if (status != INA226_OK)
+            return status;
 
-    if (status != INA226_OK)
-        return status;
+        if ((configuration & INA226_CONFIG_RESET) == 0U)
+            break;
+    }
 
     if ((configuration & INA226_CONFIG_RESET) != 0U)
         return INA226_ERROR_TIMEOUT;
@@ -323,16 +328,20 @@ INA226_Status_t INA226_GetAlertStatus(INA226_Handle_t *dev, INA226_AlertStatus_t
 
 
 /** @brief Verify, calibrate, and initialize one INA226 device. */
-INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm)
+INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A)
 {
+    float minimum_lsb;
     float current_lsb;
+    float calibration_value;
+    float shunt_voltage;
+    uint16_t calibration;
     uint16_t configuration;
     uint16_t manufacturer_id;
     uint16_t die_id;
     HAL_StatusTypeDef hal_status;
     INA226_Status_t status;
 
-    if ((dev == NULL) || (hi2c == NULL) || (!isfinite(shunt_ohm)) || (shunt_ohm <= 0.0f))
+    if ((dev == NULL) || (hi2c == NULL) || (!isfinite(shunt_ohm)) || (!isfinite(max_current_A)) || (shunt_ohm <= 0.0f) || (max_current_A <= 0.0f))
     {
         return INA226_ERROR_PARAM;
     }
@@ -340,20 +349,35 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
     if ((address < 0x40U) || (address > 0x4FU))
         return INA226_ERROR_PARAM;
 
-    /* Natural scaling maps one Shunt Voltage LSB to one Current LSB. */
-    current_lsb = (INA226_SHUNT_LSB_UV * 0.000001f) / shunt_ohm;
+    shunt_voltage = max_current_A * shunt_ohm;
 
-    if ((!isfinite(current_lsb)) || (current_lsb <= 0.0f) || (!isfinite(25.0f * current_lsb)))
+    if ((!isfinite(shunt_voltage)) || (shunt_voltage > INA226_SHUNT_RANGE_V))
     {
         return INA226_ERROR_PARAM;
     }
 
+    minimum_lsb = max_current_A / INA226_CURRENT_REG_COUNTS;
+
+    if ((!isfinite(minimum_lsb)) || (minimum_lsb <= 0.0f))
+        return INA226_ERROR_PARAM;
+
+    current_lsb = minimum_lsb;
+    calibration_value = INA226_CALIBRATION_CONSTANT / (current_lsb * shunt_ohm);
+
+    if ((!isfinite(current_lsb)) || (current_lsb <= 0.0f) || (!isfinite(INA226_POWER_LSB_MULTIPLIER * current_lsb)) || (!isfinite(calibration_value)) || (calibration_value < 1.0f) || (calibration_value > (float)INA226_CALIBRATION_MAX))
+    {
+        return INA226_ERROR_PARAM;
+    }
+
+    calibration = (uint16_t)calibration_value;
+
     dev->hi2c          = hi2c;
     dev->address       = address;
     dev->shunt_ohm     = shunt_ohm;
+    dev->max_current_A = max_current_A;
     dev->current_lsb_A = current_lsb;
-    dev->power_lsb_W   = 25.0f * current_lsb;
-    dev->calibration   = INA226_CALIBRATION_NATURAL;
+    dev->power_lsb_W   = INA226_POWER_LSB_MULTIPLIER * current_lsb;
+    dev->calibration   = calibration;
     configuration = INA226_CONFIG_RESERVED | INA226_CONFIG_AVG_16 | INA226_CONFIG_VBUSCT_1_1MS | INA226_CONFIG_VSHCT_1_1MS | INA226_CONFIG_MODE_CONT;
     dev->configuration = configuration;
     dev->mask_enable = 0U;
@@ -400,12 +424,12 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
         return status;
 
     dev->configuration = configuration;
-    status = INA226_Write16(dev, INA226_REG_CALIBRATION, INA226_CALIBRATION_NATURAL);
+    status = INA226_Write16(dev, INA226_REG_CALIBRATION, calibration);
 
     if (status != INA226_OK)
         return status;
 
-    dev->calibration = INA226_CALIBRATION_NATURAL;
+    dev->calibration = calibration;
     dev->initialized = true;
 
     return INA226_OK;
