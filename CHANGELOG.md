@@ -1,5 +1,7 @@
 # Changelog
 
+Russian version: [CHANGELOG_RUS.md](CHANGELOG_RUS.md)
+
 ## 0.2.0 — 2026-11-09
 
 ### Fixed

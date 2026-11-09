@@ -1,6 +1,6 @@
 # Драйвер INA226 для STM32 HAL
 
-Изменения и совместимость: [CHANGELOG.md](CHANGELOG.md).
+Изменения и совместимость: [CHANGELOG_RUS.md](CHANGELOG_RUS.md).
 
 English documentation: [README.md](README.md)
 
