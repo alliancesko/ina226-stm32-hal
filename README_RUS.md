@@ -1,5 +1,7 @@
 # Драйвер INA226 для STM32 HAL
 
+Изменения и совместимость: [CHANGELOG.md](CHANGELOG.md).
+
 English documentation: [README.md](README.md)
 
 ## Назначение
@@ -266,7 +268,7 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
 1. Проверку указателей и числовых параметров.
 2. Проверку адреса `0x40 ... 0x4F`.
 3. Проверку `max_current_A × shunt_ohm` относительно положительного предела `81.9175 mV`.
-4. Расчёт минимального Current LSB как `max_current_A / 32768`.
+4. Расчёт минимального Current LSB как `max_current_A / 32767`.
 5. Расчёт Power LSB и Calibration Register с проверкой допустимого 15-битного значения.
 6. Проверку присутствия устройства через `HAL_I2C_IsDeviceReady()`.
 7. Проверку Manufacturer ID `0x5449`.
@@ -293,7 +295,7 @@ Mode:                    Shunt + Bus Continuous
 Масштаб Current Register рассчитывается по формулам даташита:
 
 ```text
-Minimum Current LSB = Maximum Expected Current / 2^15
+Minimum Current LSB = Maximum Expected Current / 32767
 Calibration         = 0.00512 / (Current LSB × Rshunt)
 Power LSB           = 25 × Current LSB
 ```
@@ -301,8 +303,8 @@ Power LSB           = 25 × Current LSB
 Для максимального разрешения драйвер использует минимальный Current LSB без округления вверх. Для шунта `R100` и `max_current_A = 0.8 A`:
 
 ```text
-Current LSB = 24.4140625 µA
-Power LSB   = 610.3515625 µW
+Current LSB = 24.4158 µA
+Power LSB   = 610.396 µW
 Calibration = 2097 = 0x0831
 ```
 
@@ -347,7 +349,7 @@ INA226_Status_t INA226_GetPower_mW(INA226_Handle_t *dev, float *power_mW);
 
 `INA226_GetBusVoltage_mV()` и `INA226_GetShuntVoltage_uV()` читают только соответствующий регистр.
 
-`INA226_GetCurrent_mA()` и `INA226_GetPower_mW()` при выключенном latch сначала читают Mask/Enable и проверяют OVF. При установленном `INA226_MASK_LEN` чтение Mask/Enable пропускается, чтобы не сбросить аппаратную защёлку ALERT. В этом случае Current и Power возвращаются без проверки OVF.
+Обе функции проверяют OVF при любом LEN. Аппаратная защёлка подтверждается; AFF и CVRF сохраняются программно до получения функциями статуса.
 
 Если в программе нужны все четыре величины, предпочтительнее один вызов `INA226_Read()`, а не четыре отдельных вызова.
 
@@ -911,3 +913,11 @@ while (1)
 ## Лицензия
 
 Проект распространяется по лицензии MIT. Полный текст находится в файле [LICENSE](LICENSE).
+
+## Калибровка и события (0.2.0)
+
+После усечения CAL дополнительно ограничивается по консервативной целочисленной границе кода шунтового АЦП. Затем Current LSB пересчитывается как `(0.00512f / CAL) / Rshunt`, Power LSB — в 25 раз больше. Учитываются целый CAL и квантование АЦП; double не используется. Ошибка усиления, offset и шум требуют дополнительного запаса приложения.
+
+Новый запуск преобразования сбрасывает старый программный CVRF. Power Down сохраняет готовность последнего цикла до получения статуса или нового запуска. AFF сохраняется через смену режима до GetAlertStatus или явного отключения ALERT. Reset, успешный DeInit и любая ошибка записи очищают сохранённые события. Неверные параметры Init оставляют прежний handle и аппаратуру без изменений; ошибка I2C в Init оставляет initialized=false. После прямой записи Configuration/Calibration и любой ошибки записи обязателен повторный Init.
+
+Для выбора HAL-заголовка вместо main.h компилируйте ina226.c с `-DINA226_HAL_HEADER='"stm32f4xx_hal.h"'`. До подключения ina226.h приложение должно определить I2C_HandleTypeDef. Из-за добавления conversion_ready_pending в handle требуется пересборка всех потребителей.

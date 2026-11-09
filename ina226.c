@@ -1,7 +1,12 @@
+#ifdef INA226_HAL_HEADER
+#include INA226_HAL_HEADER
+#else
 #include "main.h"
+#endif
 #include "ina226.h"
 
 #include <math.h>
+#include <float.h>
 
 
 /** @brief Check the device handle and its basic addressing parameters. */
@@ -45,6 +50,19 @@ static INA226_Status_t INA226_Write16(INA226_Handle_t *dev, uint8_t reg, uint16_
 
     hal_status = HAL_I2C_Mem_Write(dev->hi2c, (uint16_t)(dev->address << 1), reg, I2C_MEMADD_SIZE_8BIT, data, 2U, INA226_I2C_TIMEOUT_MS);
 
+    /* An error does not prove that the device rejected the write. */
+    if (hal_status != HAL_OK)
+    {
+        dev->initialized = false;
+        dev->conversion_ready_pending = false;
+        dev->alert_function_pending = false;
+    }
+    else if ((reg == INA226_REG_CONFIG) && ((value & INA226_CONFIG_MODE_MASK) != 0U) && ((value & INA226_CONFIG_MODE_MASK) != 4U))
+    {
+        /* A new conversion must not inherit completion of the old cycle. */
+        dev->conversion_ready_pending = false;
+    }
+
     return INA226_FromHALStatus(dev->hi2c, hal_status);
 }
 
@@ -63,7 +81,14 @@ static INA226_Status_t INA226_Read16(INA226_Handle_t *dev, uint8_t reg, uint16_t
     if (status != INA226_OK)
         return status;
 
-    *value = ((uint16_t)data[0] << 8) | ((uint16_t)data[1]);
+    *value = (uint16_t)(((uint16_t)data[0] << 8) | (uint16_t)data[1]);
+
+    if (reg == INA226_REG_MASK_ENABLE)
+    {
+        dev->mask_enable = *value & INA226_MASK_WRITABLE;
+        dev->alert_function_pending |= ((*value & INA226_MASK_AFF) != 0U);
+        dev->conversion_ready_pending |= ((*value & INA226_MASK_CVRF) != 0U);
+    }
 
     return INA226_OK;
 }
@@ -84,7 +109,10 @@ static INA226_Status_t INA226_ReadFlags(INA226_Handle_t *dev, bool *conversion_r
         dev->alert_function_pending = true;
 
     if (conversion_ready != NULL)
-        *conversion_ready = ((raw & INA226_MASK_CVRF) != 0U);
+    {
+        *conversion_ready = dev->conversion_ready_pending;
+        dev->conversion_ready_pending = false;
+    }
 
     if (overflow != NULL)
         *overflow = ((raw & INA226_MASK_OVF) != 0U);
@@ -120,6 +148,8 @@ INA226_Status_t INA226_WriteRegister(INA226_Handle_t *dev, uint8_t reg, uint16_t
         dev->mask_enable = value & INA226_MASK_WRITABLE;
     else if (reg == INA226_REG_ALERT_LIMIT)
         dev->alert_limit = value;
+    else if ((reg == INA226_REG_CONFIG) || (reg == INA226_REG_CALIBRATION))
+        dev->initialized = false;
 
     return INA226_OK;
 }
@@ -129,7 +159,7 @@ INA226_Status_t INA226_WriteRegister(INA226_Handle_t *dev, uint8_t reg, uint16_t
 INA226_Status_t INA226_Reset(INA226_Handle_t *dev)
 {
     uint16_t configuration = INA226_CONFIG_RESET;
-    uint8_t attempt;
+    unsigned int attempt;
     INA226_Status_t status;
 
     if (!INA226_IsHandleValid(dev))
@@ -137,6 +167,8 @@ INA226_Status_t INA226_Reset(INA226_Handle_t *dev)
 
     dev->initialized = false;
 
+    dev->conversion_ready_pending = false;
+    dev->alert_function_pending = false;
     status = INA226_Write16(dev, INA226_REG_CONFIG, INA226_CONFIG_RESET);
 
     if (status != INA226_OK)
@@ -161,6 +193,7 @@ INA226_Status_t INA226_Reset(INA226_Handle_t *dev)
     dev->mask_enable = 0U;
     dev->alert_limit = 0U;
     dev->alert_function_pending = false;
+    dev->conversion_ready_pending = false;
 
     return INA226_OK;
 }
@@ -191,6 +224,7 @@ INA226_Status_t INA226_DeInit(INA226_Handle_t *dev)
 
     dev->mask_enable = 0U;
     dev->alert_function_pending = false;
+    dev->conversion_ready_pending = false;
     dev->initialized = false;
 
     return INA226_OK;
@@ -206,7 +240,7 @@ INA226_Status_t INA226_Configure(INA226_Handle_t *dev, INA226_Averaging_t averag
     if (!INA226_IsHandleValid(dev) || !dev->initialized || ((uint32_t)averaging > 7U) || ((uint32_t)bus_time > 7U) || ((uint32_t)shunt_time > 7U) || ((uint32_t)mode > 7U))
         return INA226_ERROR_PARAM;
 
-    configuration = INA226_CONFIG_RESERVED | ((uint16_t)averaging << INA226_CONFIG_AVG_SHIFT) | ((uint16_t)bus_time << INA226_CONFIG_VBUSCT_SHIFT) | ((uint16_t)shunt_time << INA226_CONFIG_VSHCT_SHIFT) | (uint16_t)mode;
+    configuration = (uint16_t)(INA226_CONFIG_RESERVED | ((uint32_t)averaging << INA226_CONFIG_AVG_SHIFT) | ((uint32_t)bus_time << INA226_CONFIG_VBUSCT_SHIFT) | ((uint32_t)shunt_time << INA226_CONFIG_VSHCT_SHIFT) | (uint32_t)mode);
     status = INA226_Write16(dev, INA226_REG_CONFIG, configuration);
 
     if (status != INA226_OK)
@@ -319,9 +353,10 @@ INA226_Status_t INA226_GetAlertStatus(INA226_Handle_t *dev, INA226_AlertStatus_t
 
     dev->mask_enable = raw & INA226_MASK_WRITABLE;
     alert_status->alert_function = ((raw & INA226_MASK_AFF) != 0U) || dev->alert_function_pending;
-    alert_status->conversion_ready = ((raw & INA226_MASK_CVRF) != 0U);
+    alert_status->conversion_ready = dev->conversion_ready_pending;
     alert_status->overflow = ((raw & INA226_MASK_OVF) != 0U);
     dev->alert_function_pending = false;
+    dev->conversion_ready_pending = false;
 
     return INA226_OK;
 }
@@ -330,11 +365,12 @@ INA226_Status_t INA226_GetAlertStatus(INA226_Handle_t *dev, INA226_AlertStatus_t
 /** @brief Verify, calibrate, and initialize one INA226 device. */
 INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A)
 {
-    float minimum_lsb;
     float current_lsb;
     float calibration_value;
     float shunt_voltage;
     uint16_t calibration;
+    uint32_t shunt_code_bound;
+    uint32_t calibration_bound;
     uint16_t configuration;
     uint16_t manufacturer_id;
     uint16_t die_id;
@@ -351,25 +387,33 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
 
     shunt_voltage = max_current_A * shunt_ohm;
 
-    if ((!isfinite(shunt_voltage)) || (shunt_voltage > INA226_SHUNT_RANGE_V))
+    if ((!isfinite(shunt_voltage)) || (shunt_voltage <= 0.0f) || (shunt_voltage > INA226_SHUNT_RANGE_V))
     {
         return INA226_ERROR_PARAM;
     }
 
-    minimum_lsb = max_current_A / INA226_CURRENT_REG_COUNTS;
+    /* This form avoids an intermediate subnormal Current_LSB * Rshunt. */
+    calibration_value = (INA226_CALIBRATION_CONSTANT * INA226_CURRENT_REG_COUNTS) / shunt_voltage;
 
-    if ((!isfinite(minimum_lsb)) || (minimum_lsb <= 0.0f))
-        return INA226_ERROR_PARAM;
-
-    current_lsb = minimum_lsb;
-    calibration_value = INA226_CALIBRATION_CONSTANT / (current_lsb * shunt_ohm);
-
-    if ((!isfinite(current_lsb)) || (current_lsb <= 0.0f) || (!isfinite(INA226_POWER_LSB_MULTIPLIER * current_lsb)) || (!isfinite(calibration_value)) || (calibration_value < 1.0f) || (calibration_value > (float)INA226_CALIBRATION_MAX))
+    if ((!isfinite(calibration_value)) || (calibration_value < 1.0f) || (calibration_value >= (float)INA226_CALIBRATION_MAX + 1.0f))
     {
         return INA226_ERROR_PARAM;
     }
 
     calibration = (uint16_t)calibration_value;
+    /* Bound ADC rounding as well as float rounding, then use exact integers.
+     * One whole shunt count exceeds half-count ADC quantization plus the
+     * binary32 product/division error throughout the accepted input range.
+     */
+    shunt_code_bound = (uint32_t)(shunt_voltage / 0.0000025f) + 1U;
+    calibration_bound = (32767U * 2048U) / shunt_code_bound;
+    if ((uint32_t)calibration > calibration_bound)
+        calibration = (uint16_t)calibration_bound;
+
+    /* Match software scaling to the integer actually programmed into CAL. */
+    current_lsb = (INA226_CALIBRATION_CONSTANT / (float)calibration) / shunt_ohm;
+    if ((!isfinite(current_lsb)) || (current_lsb < FLT_MIN) || (current_lsb > FLT_MAX / (65535.0f * 25000.0f)))
+        return INA226_ERROR_PARAM;
 
     dev->hi2c          = hi2c;
     dev->address       = address;
@@ -383,6 +427,7 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
     dev->mask_enable = 0U;
     dev->alert_limit = 0U;
     dev->alert_function_pending = false;
+    dev->conversion_ready_pending = false;
     dev->initialized = false;
 
     hal_status = HAL_I2C_IsDeviceReady(hi2c, (uint16_t)(address << 1), 3U, INA226_I2C_TIMEOUT_MS);
@@ -392,7 +437,7 @@ INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8
         if (hal_status == HAL_BUSY)
             return INA226_ERROR_I2C;
 
-        if (hal_status == HAL_TIMEOUT)
+        if (INA226_FromHALStatus(hi2c, hal_status) == INA226_ERROR_TIMEOUT)
             return INA226_ERROR_TIMEOUT;
 
         return INA226_ERROR_NOT_FOUND;
@@ -495,13 +540,10 @@ INA226_Status_t INA226_GetCurrent_mA(INA226_Handle_t *dev, float *current_mA)
     if (!dev->initialized)
         return INA226_ERROR_PARAM;
 
-    if ((dev->mask_enable & INA226_MASK_LEN) == 0U)
-    {
-        status = INA226_ReadFlags(dev, NULL, &overflow);
+    status = INA226_ReadFlags(dev, NULL, &overflow);
 
-        if (status != INA226_OK)
-            return status;
-    }
+    if (status != INA226_OK)
+        return status;
 
     if (overflow)
         return INA226_ERROR_OVERFLOW;
@@ -511,7 +553,7 @@ INA226_Status_t INA226_GetCurrent_mA(INA226_Handle_t *dev, float *current_mA)
     if (status != INA226_OK)
         return status;
 
-    *current_mA = (float)((int16_t)raw) * dev->current_lsb_A * 1000.0f;
+    *current_mA = (float)((int16_t)raw) * (dev->current_lsb_A * 1000.0f);
 
     return INA226_OK;
 }
@@ -530,13 +572,10 @@ INA226_Status_t INA226_GetPower_mW(INA226_Handle_t *dev, float *power_mW)
     if (!dev->initialized)
         return INA226_ERROR_PARAM;
 
-    if ((dev->mask_enable & INA226_MASK_LEN) == 0U)
-    {
-        status = INA226_ReadFlags(dev, NULL, &overflow);
+    status = INA226_ReadFlags(dev, NULL, &overflow);
 
-        if (status != INA226_OK)
-            return status;
-    }
+    if (status != INA226_OK)
+        return status;
 
     if (overflow)
         return INA226_ERROR_OVERFLOW;
@@ -546,7 +585,7 @@ INA226_Status_t INA226_GetPower_mW(INA226_Handle_t *dev, float *power_mW)
     if (status != INA226_OK)
         return status;
 
-    *power_mW = (float)raw * dev->power_lsb_W * 1000.0f;
+    *power_mW = (float)raw * (dev->power_lsb_W * 1000.0f);
 
     return INA226_OK;
 }
@@ -615,8 +654,8 @@ INA226_Status_t INA226_Read(INA226_Handle_t *dev, INA226_Data_t *data)
 
     data->bus_voltage_mV = (float)bus_raw * INA226_BUS_LSB_MV;
     data->shunt_voltage_uV = (float)((int16_t)shunt_raw) * INA226_SHUNT_LSB_UV;
-    data->current_mA = (float)((int16_t)current_raw) * dev->current_lsb_A * 1000.0f;
-    data->power_mW = (float)power_raw * dev->power_lsb_W * 1000.0f;
+    data->current_mA = (float)((int16_t)current_raw) * (dev->current_lsb_A * 1000.0f);
+    data->power_mW = (float)power_raw * (dev->power_lsb_W * 1000.0f);
 
     return INA226_OK;
 }

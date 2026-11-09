@@ -1,5 +1,7 @@
 # INA226 Driver for STM32 HAL
 
+Changes and compatibility notes: [CHANGELOG.md](CHANGELOG.md).
+
 Russian documentation: [README_RUS.md](README_RUS.md)
 
 ## Overview
@@ -257,7 +259,7 @@ The function performs the following operations:
 1. Validates pointers and numeric parameters.
 2. Validates the `0x40 ... 0x4F` address range.
 3. Validates `max_current_A × shunt_ohm` against the positive `81.9175 mV` limit.
-4. Calculates the minimum Current LSB as `max_current_A / 32768`.
+4. Calculates the minimum Current LSB as `max_current_A / 32767`.
 5. Calculates Power LSB and the Calibration Register, validating its 15-bit range.
 6. Probes the device with `HAL_I2C_IsDeviceReady()`.
 7. Verifies Manufacturer ID `0x5449`.
@@ -284,7 +286,7 @@ The approximate update period is:
 Current scaling follows the datasheet equations:
 
 ```text
-Minimum Current LSB = Maximum Expected Current / 2^15
+Minimum Current LSB = Maximum Expected Current / 32767
 Calibration         = 0.00512 / (Current LSB × Rshunt)
 Power LSB           = 25 × Current LSB
 ```
@@ -292,8 +294,8 @@ Power LSB           = 25 × Current LSB
 For maximum resolution, the driver uses the minimum Current LSB without upward rounding. For an `R100` shunt and `max_current_A = 0.8 A`:
 
 ```text
-Current LSB = 24.4140625 µA
-Power LSB   = 610.3515625 µW
+Current LSB = 24.4158 µA
+Power LSB   = 610.396 µW
 Calibration = 2097 = 0x0831
 ```
 
@@ -338,7 +340,7 @@ INA226_Status_t INA226_GetPower_mW(INA226_Handle_t *dev, float *power_mW);
 
 `INA226_GetBusVoltage_mV()` and `INA226_GetShuntVoltage_uV()` read only the corresponding measurement register.
 
-With latch disabled, `INA226_GetCurrent_mA()` and `INA226_GetPower_mW()` first read Mask/Enable and reject an active OVF condition. With latch enabled, they skip Mask/Enable to avoid acknowledging the hardware latch. Current and Power are then returned without checking OVF.
+Both scalar getters check OVF regardless of LEN. This acknowledges the hardware latch; AFF and CVRF are preserved in software until consumed by the status API.
 
 When all four values are required, prefer one `INA226_Read()` call instead of four individual calls.
 
@@ -879,3 +881,11 @@ The driver was implemented for STM32 HAL from the Texas Instruments INA226 datas
 ## License
 
 This project is distributed under the MIT License. See [LICENSE](LICENSE).
+
+## Calibration and event lifecycle (0.2.0)
+
+After truncation, CAL is limited using a conservative integer shunt ADC code bound. Current LSB is then recalculated as `(0.00512f / CAL) / Rshunt`; Power LSB is 25 times that value. This accounts for integer CAL and ADC quantization without double arithmetic. Sensor gain error, offset, and noise require additional application headroom.
+
+A new conversion discards pending CVRF from the previous cycle. Power-down retains completion of the last cycle until consumed or a new conversion starts. Pending AFF survives mode changes until GetAlertStatus consumes it or alerts are explicitly disabled. Reset, successful DeInit, and any write failure discard pending events. Invalid Init parameters leave the old handle and hardware unchanged; an I2C initialization failure leaves initialized false. Direct Configuration/Calibration writes and all failed writes require a new Init.
+
+Compile ina226.c with `-DINA226_HAL_HEADER='"stm32f4xx_hal.h"'` to select a HAL header instead of main.h. The application must define I2C_HandleTypeDef before including ina226.h. Rebuild all consumers because the handle gained conversion_ready_pending.

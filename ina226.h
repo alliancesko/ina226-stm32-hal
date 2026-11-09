@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <stdint.h>
 
 
 /* INA226 7-bit I2C addresses selected by A1 and A0. */
@@ -86,7 +87,7 @@ extern "C" {
 
 #define INA226_I2C_TIMEOUT_MS       100U
 #define INA226_RESET_POLL_ATTEMPTS  10U
-#define INA226_CURRENT_REG_COUNTS   32768.0f
+#define INA226_CURRENT_REG_COUNTS   32767.0f
 #define INA226_CALIBRATION_MAX      0x7FFFU
 #define INA226_CALIBRATION_CONSTANT 0.00512f
 #define INA226_SHUNT_RANGE_V        0.0819175f
@@ -208,6 +209,7 @@ typedef struct
     uint16_t alert_limit;      /**< Cached raw Alert Limit register value. */
 
     bool alert_function_pending; /**< ALERT event preserved until status read. */
+    bool conversion_ready_pending; /**< Conversion event preserved until consumed. */
     bool initialized;          /**< Device passed initialization successfully. */
 
 } INA226_Handle_t;
@@ -225,6 +227,11 @@ typedef struct
  * @param address        7-bit INA226 I2C address (0x40 ... 0x4F).
  * @param shunt_ohm      Shunt resistance in ohms.
  * @param max_current_A  Maximum expected current magnitude in amperes.
+ *
+ * Parameter validation failure leaves the handle and hardware unchanged.
+ * Once I2C initialization starts, any failure leaves initialized false.
+ * Starting a new conversion discards pending CVRF from the previous cycle;
+ * pending AFF survives mode changes until explicitly consumed or disabled.
  */
 INA226_Status_t INA226_Init(INA226_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t address, float shunt_ohm, float max_current_A);
 
@@ -320,8 +327,8 @@ INA226_Status_t INA226_GetShuntVoltage_uV(INA226_Handle_t *dev, float *voltage_u
 /**
  * @brief Read signed current in milliamperes.
  *
- * Returns INA226_ERROR_OVERFLOW when the math overflow flag is set. In ALERT
- * latch mode OVF is not read because that would clear the hardware latch.
+ * Checks OVF regardless of LEN. Acknowledges the hardware latch while
+ * preserving AFF and CVRF in software.
  */
 INA226_Status_t INA226_GetCurrent_mA(INA226_Handle_t *dev, float *current_mA);
 
@@ -329,8 +336,8 @@ INA226_Status_t INA226_GetCurrent_mA(INA226_Handle_t *dev, float *current_mA);
 /**
  * @brief Read power in milliwatts.
  *
- * Returns INA226_ERROR_OVERFLOW when the math overflow flag is set. In ALERT
- * latch mode OVF is not read because that would clear the hardware latch.
+ * Checks OVF regardless of LEN. Acknowledges the hardware latch while
+ * preserving AFF and CVRF in software.
  */
 INA226_Status_t INA226_GetPower_mW(INA226_Handle_t *dev, float *power_mW);
 
@@ -362,9 +369,9 @@ INA226_Status_t INA226_ReadRegister(INA226_Handle_t *dev, uint8_t reg, uint16_t 
 /**
  * @brief Write a raw 16-bit INA226 register.
  *
- * Writing Configuration or Calibration directly can make the hardware state
- * differ from the scaling values cached in the handle. Reinitialize the
- * device before using the high-level measurement functions afterward.
+ * Writing Configuration or Calibration invalidates initialization. Any failed
+ * write also invalidates initialization because the hardware may have accepted
+ * data. Reinitialize before using high-level operations again.
  */
 INA226_Status_t INA226_WriteRegister(INA226_Handle_t *dev, uint8_t reg, uint16_t value);
 
